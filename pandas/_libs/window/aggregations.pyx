@@ -490,22 +490,27 @@ def roll_var(const float64_t[:] values, ndarray[int64_t] start,
 # Rolling skewness
 
 
-cdef float64_t calc_skew(int64_t minp, int64_t nobs,
-                         float64_t mean, float64_t m2, float64_t m3,
-                         int64_t num_consecutive_same_value
-                         ) noexcept nogil:
+cdef struct Moments:
+    int nobs
+    float64_t mean, m2, m3
+    bint numerically_unstable
+    float64_t last_value
+    int nconsecutive
+
+
+cdef float64_t calc_skew(int64_t minp, Moments moments) noexcept nogil:
     cdef:
         float64_t result, dnobs
         float64_t moments_ratio, correction
 
-    if nobs >= minp:
-        dnobs = <float64_t>nobs
+    if moments.nobs >= minp:
+        dnobs = <float64_t>moments.nobs
 
-        if nobs < 3:
+        if moments.nobs < 3:
             result = NaN
         # GH 42064 46431
         # uniform case, force result to be 0
-        elif num_consecutive_same_value >= nobs:
+        elif moments.nconsecutive >= moments.nobs:
             result = 0.0
         # #18044: with degenerate distribution, floating issue will
         #         cause m2 != 0. and cause the result is a very
@@ -516,24 +521,16 @@ cdef float64_t calc_skew(int64_t minp, int64_t nobs,
         #         if the variance is less than 1e-14, it could be
         #         treat as zero, here we follow the original
         #         skew/kurt behaviour to check m2 <= n * 1e-14
-        elif m2 <= dnobs * 1e-14:
+        elif moments.m2 <= dnobs * 1e-14:
             result = NaN
         else:
-            moments_ratio = m3 / (m2 * sqrt(m2))
-            correction = dnobs * sqrt((dnobs - 1)) / (dnobs - 2)
+            moments_ratio = moments.m3 / (moments.m2 * sqrt(moments.m2))
+            correction = dnobs * sqrt(dnobs - 1) / (dnobs - 2)
             result = moments_ratio * correction
     else:
         result = NaN
 
     return result
-
-
-cdef struct Moments:
-    int n
-    float64_t mean, m2, m3
-    bint numerically_unstable
-    float64_t last_value
-    int nconsecutive
 
 
 cdef Moments compute_moments(
@@ -597,7 +594,12 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
     # formulas adapted from
     # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Higher-order_statistics
 
-    result.n = left_moment.n + right_moment.n
+    if left_moment.nobs == 0:
+        return right_moment
+    elif right_moment.nobs == 0:
+        return left_moment
+
+    result.nobs = left_moment.nobs + right_moment.nobs
     result.numerically_unstable = (
         left_moment.numerically_unstable
         or right_moment.numerically_unstable
@@ -605,9 +607,9 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
     result.last_value = right_moment.last_value
     result.nconsecutive = right_moment.nconsecutive
 
-    n = <float64_t>result.n
-    right_n = right_moment.n
-    left_n = left_moment.n
+    n = <float64_t>result.nobs
+    right_n = right_moment.nobs
+    left_n = left_moment.nobs
 
     delta = right_moment.mean - left_moment.mean
     delta_n = delta / n
@@ -626,7 +628,7 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
 
     if (
         left_moment.last_value == right_moment.last_value
-        and right_moment.n == right_moment.nconsecutive
+        and right_moment.nobs == right_moment.nconsecutive
     ):
         # GH#42064, record num of same values to remove floating point artifacts
         result.nconsecutive += left_moment.nconsecutive
@@ -643,15 +645,18 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
     # M_{p, n} = Sum_{k=0}^{p} Choose(p, k) * (delta / a) ^ k * (
     #            b^k M_{p - k, a} - a^k M_{p - k, b}
     # )
-    # a: left_moment.n
-    # b: right_moment.n
+    # a: left_moment.nobs
+    # b: right_moment.nobs
     # M_{p, x}: p-th central moment for sample x.
     # delta: mean_sample_b - mean_sample_a
 
-    if left_moment.n < right_moment.n:
+    if left_moment.nobs < right_moment.nobs:
         left_moment, right_moment = right_moment, left_moment
 
-    result.n = left_moment.n - right_moment.n
+    if right_moment.nobs == 0:
+        return left_moment
+
+    result.nobs = left_moment.nobs - right_moment.nobs
     result.numerically_unstable = (
         left_moment.numerically_unstable
         or right_moment.numerically_unstable
@@ -659,9 +664,9 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
     result.last_value = left_moment.last_value
     result.nconsecutive = left_moment.nconsecutive
 
-    n = <float64_t>result.n
-    right_n = right_moment.n
-    left_n = left_moment.n
+    n = <float64_t>result.nobs
+    right_n = right_moment.nobs
+    left_n = left_moment.nobs
 
     delta = right_moment.mean - left_moment.mean
     delta_n = delta / n
@@ -670,7 +675,7 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
     m2_diff = fma(right_n , left_moment.m2, -left_n * right_moment.m2)
     m0_diff = -delta2_n * left_n * right_n * (left_n + right_n)
 
-    result.m3 = left_moment.m3 - right_moment.m3 + delta_n *  fma(3.0, m2_diff, m0_diff)
+    result.m3 = left_moment.m3 - right_moment.m3 + delta_n * fma(3.0, m2_diff, m0_diff)
     result.m2 = left_moment.m2 - right_moment.m2 - delta2_n * left_n * right_n
     result.mean = left_moment.mean - delta_n * right_n
 
@@ -684,15 +689,12 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
 def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
               ndarray[int64_t] end, int64_t minp) -> np.ndarray:
     cdef:
-        Py_ssize_t i, j
-        float64_t val
-        float64_t mean, m2, m3
-        float64_t prev_value
-        int64_t nobs = 0, N = len(start)
-        int64_t s, e, num_consecutive_same_value
+        Py_ssize_t i
+        int64_t N = len(start)
+        int64_t s, e
         ndarray[float64_t] output
         bint is_monotonic_increasing_bounds
-        bint requires_recompute, numerically_unstable = False
+        bint requires_recompute
         Moments moments, aux_moments
         float64_t *values_ptr
 
@@ -735,9 +737,8 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
             if requires_recompute or moments.numerically_unstable:
                 moments = compute_moments(values_ptr, s, e)
                 moments.numerically_unstable = False
-                num_consecutive_same_value = 0
 
-            output[i] = calc_skew(minp, moments.n, moments.mean, moments.m2, moments.m3, moments.nconsecutive)
+            output[i] = calc_skew(minp, moments)
 
             if not is_monotonic_increasing_bounds:
                 moments = Moments(0, 0, 0, 0, False, 0, 0)
