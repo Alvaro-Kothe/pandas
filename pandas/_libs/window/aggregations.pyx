@@ -493,7 +493,7 @@ def roll_var(const float64_t[:] values, ndarray[int64_t] start,
 cdef struct Moments:
     int nobs
     float64_t mean, m2, m3
-    bint numerically_unstable
+    bint numerically_unstable_m3
     float64_t last_value
     int nconsecutive
 
@@ -600,9 +600,9 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
         return left_moment
 
     result.nobs = left_moment.nobs + right_moment.nobs
-    result.numerically_unstable = (
-        left_moment.numerically_unstable
-        or right_moment.numerically_unstable
+    result.numerically_unstable_m3 = (
+        left_moment.numerically_unstable_m3
+        or right_moment.numerically_unstable_m3
     )
     result.last_value = right_moment.last_value
     result.nconsecutive = right_moment.nconsecutive
@@ -624,7 +624,7 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
 
     ill_contitioned = fabs(result.m3) < InvConditionNumber * fabs(left_moment.m3)
     if ill_contitioned:
-        result.numerically_unstable = True
+        result.numerically_unstable_m3 = True
 
     if (
         left_moment.last_value == right_moment.last_value
@@ -657,9 +657,9 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
         return left_moment
 
     result.nobs = left_moment.nobs - right_moment.nobs
-    result.numerically_unstable = (
-        left_moment.numerically_unstable
-        or right_moment.numerically_unstable
+    result.numerically_unstable_m3 = (
+        left_moment.numerically_unstable_m3
+        or right_moment.numerically_unstable_m3
     )
     result.last_value = left_moment.last_value
     result.nconsecutive = left_moment.nconsecutive
@@ -681,7 +681,7 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
 
     ill_contitioned = fabs(result.m3) < InvConditionNumber * fabs(left_moment.m3)
     if ill_contitioned:
-        result.numerically_unstable = True
+        result.numerically_unstable_m3 = True
 
     return result
 
@@ -734,9 +734,9 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
                 aux_moments = compute_moments(values_ptr, end[i-1], e)
                 moments = add_moments(moments, aux_moments)
 
-            if requires_recompute or moments.numerically_unstable:
+            if requires_recompute or moments.numerically_unstable_m3:
                 moments = compute_moments(values_ptr, s, e)
-                moments.numerically_unstable = False
+                moments.numerically_unstable_m3 = False
 
             output[i] = calc_skew(minp, moments)
 
