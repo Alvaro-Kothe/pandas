@@ -63,6 +63,7 @@ cdef:
     float64_t MAXfloat64 = np.inf
 
     float64_t NaN = <float64_t>np.nan
+    float64_t EpsF64 = np.finfo(np.float64).eps
 
 cdef bint is_monotonic_increasing_start_end_bounds(
     ndarray[int64_t, ndim=1] start, ndarray[int64_t, ndim=1] end
@@ -525,6 +526,7 @@ cdef float64_t calc_skew(int64_t minp, int64_t nobs,
 cdef struct Moments:
     int n
     float64_t mean, m2, m3
+    bint numerically_unstable
 
 
 cdef Moments compute_moments(
@@ -536,23 +538,23 @@ cdef Moments compute_moments(
         Py_ssize_t mid
 
     if start >= end:
-        return Moments(0, 0, 0, 0)
+        return Moments(0, 0, 0, 0, False)
     elif start + 1 == end:
         if arr[start] != arr[start]:
             # is NaN
-            return Moments(0, 0, 0, 0)
+            return Moments(0, 0, 0, 0, False)
 
-        return Moments(1, arr[start], 0, 0)
+        return Moments(1, arr[start], 0, 0, False)
     elif start + 2 == end:
         if arr[start] != arr[start] and arr[start + 1] != arr[start + 1]:
             # Both are NaN
-            return Moments(0, 0, 0, 0)
+            return Moments(0, 0, 0, 0, False)
         elif arr[start] != arr[start]:
-            return Moments(1, arr[start + 1], 0, 0)
+            return Moments(1, arr[start + 1], 0, 0, False)
         elif arr[start + 1] != arr[start + 1]:
-            return Moments(1, arr[start], 0, 0)
+            return Moments(1, arr[start], 0, 0, False)
 
-        result = Moments(2, 0, 0, 0)
+        result = Moments(2, 0, 0, 0, False)
         result.mean = (arr[start] + arr[start + 1]) / 2.0
         delta = arr[start] - arr[start + 1]
         result.m2 = delta * delta / 2.0
@@ -571,8 +573,13 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
     cdef:
         Moments result
         float64_t left_n, right_n, n, delta, delta_n, delta2_n
+        bint is_zero, lost_significant_digits
 
     result.n = left_moment.n + right_moment.n
+    result.numerically_unstable = (
+        left_moment.numerically_unstable
+        or right_moment.numerically_unstable
+    )
 
     n = <float64_t>result.n
     right_n = right_moment.n
@@ -592,34 +599,53 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
     result.m2 = left_moment.m2 + right_moment.m2 + delta2_n * left_n * right_n
     result.mean = left_moment.mean + delta_n * right_n
 
+    is_zero = fabs(result.m3) <= EpsF64 * EpsF64 * EpsF64 * result.m2 * fabs(result.mean)
+    lost_significant_digits = fabs(result.m3) < 1e3 * EpsF64 * fabs(left_moment.m3)
+    if not is_zero and lost_significant_digits:
+        result.numerically_unstable = True
+
+
     return result
 
 cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept nogil:
     cdef:
         Moments result
         float64_t left_n, right_n, n, delta, delta_n, delta2_n
+        bint is_zero, lost_significant_digits
 
     if left_moment.n < right_moment.n:
         left_moment, right_moment = right_moment, left_moment
 
     result.n = left_moment.n - right_moment.n
+    result.numerically_unstable = (
+        left_moment.numerically_unstable
+        or right_moment.numerically_unstable
+    )
+
     n = <float64_t>result.n
     right_n = right_moment.n
     left_n = left_moment.n
 
-    delta = left_moment.mean - right_moment.mean
+    delta = right_moment.mean - left_moment.mean
     delta_n = delta / n
     delta2_n = delta * delta_n
 
     result.m3 = (
-        left_moment.m3 - right_moment.m3 -
+        left_moment.m3 - right_moment.m3 +
         delta_n * (
-            3 * fma(right_n, left_moment.m2, -left_n * right_moment.m2) +
-            delta2_n * left_n * right_n * (left_n + right_n)
+            3 * (right_n * left_moment.m2 - left_n * right_moment.m2)
+            - delta2_n * left_n * right_n * (left_n + right_n)
         )
     )
     result.m2 = left_moment.m2 - right_moment.m2 - delta2_n * left_n * right_n
-    result.mean = left_moment.mean + delta_n * right_n
+    result.mean = left_moment.mean - delta_n * right_n
+
+    is_zero = fabs(result.m3) <= EpsF64 * EpsF64 * EpsF64 * result.m2 * fabs(result.mean)
+    lost_significant_digits = fabs(result.m3) < 1e3 * EpsF64 * fabs(left_moment.m3)
+    if not is_zero and lost_significant_digits:
+        result.numerically_unstable = True
+
+    return result
 
 
 cdef void add_skew(float64_t val, int64_t *nobs,
@@ -713,7 +739,7 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
         ndarray[float64_t] output
         bint is_monotonic_increasing_bounds
         bint requires_recompute, numerically_unstable = False
-        Moments moments
+        Moments moments, aux_moments
         float64_t *values_ptr
 
     minp = max(minp, 3)
@@ -724,6 +750,7 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
 
     with nogil:
         values_ptr = <float64_t*>PyArray_DATA(values)
+        moments = Moments(0, 0, 0, 0, False)
         for i in range(0, N):
 
             s = start[i]
@@ -741,44 +768,21 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
                 # After the first window, observations can both be added
                 # and removed
                 # calculate deletes
-                for j in range(start[i - 1], s):
-                    val = values[j]
-                    remove_skew(val, &nobs, &mean, &m2, &m3, &numerically_unstable)
+                aux_moments = compute_moments(values_ptr, start[i-1], s)
+                moments = remove_moments(moments, aux_moments)
 
                 # calculate adds
-                for j in range(end[i - 1], e):
-                    val = values[j]
-                    add_skew(val, &nobs, &mean, &m2, &m3, &numerically_unstable,
-                             &num_consecutive_same_value, &prev_value)
+                aux_moments = compute_moments(values_ptr, end[i-1], e)
+                moments = add_moments(moments, aux_moments)
 
-            if requires_recompute or numerically_unstable:
-
-                prev_value = values[s]
-                num_consecutive_same_value = 0
-
-                mean = m2 = m3 = 0.0
-                nobs = 0
-
+            if requires_recompute or moments.numerically_unstable:
                 moments = compute_moments(values_ptr, s, e)
-                mean = moments.mean
-                m2 = moments.m2
-                m3 = moments.m3
-                nobs = moments.n
+                moments.numerically_unstable = False
 
-                # for j in range(s, e):
-                #     val = values[j]
-                #     add_skew(val, &nobs, &mean, &m2, &m3, &numerically_unstable,
-                #              &num_consecutive_same_value, &prev_value)
-
-                numerically_unstable = False
-
-            output[i] = calc_skew(minp, nobs, mean, m2, m3, num_consecutive_same_value)
+            output[i] = calc_skew(minp, moments.n, moments.mean, moments.m2, moments.m3, num_consecutive_same_value)
 
             if not is_monotonic_increasing_bounds:
-                nobs = 0
-                mean = 0.0
-                m2 = 0.0
-                m3 = 0.0
+                moments = Moments(0, 0, 0, 0, False)
 
     return output
 
