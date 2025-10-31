@@ -628,6 +628,7 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
         left_moment.last_value == right_moment.last_value
         and right_moment.n == right_moment.nconsecutive
     ):
+        # GH#42064, record num of same values to remove floating point artifacts
         result.nconsecutive += left_moment.nconsecutive
 
     return result
