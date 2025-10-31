@@ -594,6 +594,33 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
 
     return result
 
+cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept nogil:
+    cdef:
+        Moments result
+        float64_t left_n, right_n, n, delta, delta_n, delta2_n
+
+    if left_moment.n < right_moment.n:
+        left_moment, right_moment = right_moment, left_moment
+
+    result.n = left_moment.n - right_moment.n
+    n = <float64_t>result.n
+    right_n = right_moment.n
+    left_n = left_moment.n
+
+    delta = left_moment.mean - right_moment.mean
+    delta_n = delta / n
+    delta2_n = delta * delta_n
+
+    result.m3 = (
+        left_moment.m3 - right_moment.m3 -
+        delta_n * (
+            3 * fma(right_n, left_moment.m2, -left_n * right_moment.m2) +
+            delta2_n * left_n * right_n * (left_n + right_n)
+        )
+    )
+    result.m2 = left_moment.m2 - right_moment.m2 - delta2_n * left_n * right_n
+    result.mean = left_moment.mean + delta_n * right_n
+
 
 cdef void add_skew(float64_t val, int64_t *nobs,
                    float64_t *mean, float64_t *m2,
