@@ -521,12 +521,15 @@ cdef float64_t calc_skew(int64_t minp, int64_t nobs,
 
     return result
 
+
 cdef struct Moments:
     int n
     float64_t mean, m2, m3
 
 
-cdef Moments compute_moments(float64_t *arr, Py_ssize_t start, Py_ssize_t end) noexcept nogil:
+cdef Moments compute_moments(
+        const float64_t *arr, Py_ssize_t start, Py_ssize_t end,
+        ) noexcept nogil:
     cdef:
         Moments left_moment, right_moment, result
         float64_t delta
@@ -542,6 +545,7 @@ cdef Moments compute_moments(float64_t *arr, Py_ssize_t start, Py_ssize_t end) n
         return Moments(1, arr[start], 0, 0)
     elif start + 2 == end:
         if arr[start] != arr[start] and arr[start + 1] != arr[start + 1]:
+            # Both are NaN
             return Moments(0, 0, 0, 0)
         elif arr[start] != arr[start]:
             return Moments(1, arr[start + 1], 0, 0)
@@ -580,8 +584,10 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
 
     result.m3 = (
         left_moment.m3 + right_moment.m3 +
-        3 * fma(left_n, right_moment.m2, -right_n * left_moment.m2) +
-        delta2_n * left_n * right_n * (left_n - right_n)
+        delta_n * (
+            3 * fma(left_n, right_moment.m2, -right_n * left_moment.m2) +
+            delta2_n * left_n * right_n * (left_n - right_n)
+        )
     )
     result.m2 = left_moment.m2 + right_moment.m2 + delta2_n * left_n * right_n
     result.mean = left_moment.mean + delta_n * right_n
