@@ -65,6 +65,11 @@ cdef:
     float64_t NaN = <float64_t>np.nan
     float64_t EpsF64 = np.finfo(np.float64).eps
 
+    # Consider an operation ill-conditioned if
+    # it will only have up to 3 significant digits remaining in base 10.
+    # https://en.wikipedia.org/wiki/Condition_number
+    float64_t InvConditionNumber = EpsF64 * 1e3
+
 cdef bint is_monotonic_increasing_start_end_bounds(
     ndarray[int64_t, ndim=1] start, ndarray[int64_t, ndim=1] end
 ):
@@ -527,6 +532,8 @@ cdef struct Moments:
     int n
     float64_t mean, m2, m3
     bint numerically_unstable
+    float64_t last_value
+    int nconsecutive
 
 
 cdef Moments compute_moments(
@@ -537,27 +544,39 @@ cdef Moments compute_moments(
         float64_t delta
         Py_ssize_t mid
 
+    # Chan, T. F., Golub, G. H., & LeVeque, R. J. (1983).
+    # Algorithms for computing the sample variance:
+    # Analysis and recommendations.
+    # The American Statistician, 37(3), 242-247.
+    #
+    # Compute central moments using pairs of data.
+    # According to the citation above, this method is the most
+    # well behaved against ill conditioned data and large samples.
+    # With error bound to condition-number * eps * log n
+
     if start >= end:
-        return Moments(0, 0, 0, 0, False)
+        return Moments(0, 0, 0, 0, False, 0, 0)
     elif start + 1 == end:
         if arr[start] != arr[start]:
             # is NaN
-            return Moments(0, 0, 0, 0, False)
+            return Moments(0, 0, 0, 0, False, 0, 0)
 
-        return Moments(1, arr[start], 0, 0, False)
+        return Moments(1, arr[start], 0, 0, False, arr[start], 1)
     elif start + 2 == end:
         if arr[start] != arr[start] and arr[start + 1] != arr[start + 1]:
             # Both are NaN
-            return Moments(0, 0, 0, 0, False)
+            return Moments(0, 0, 0, 0, False, 0, 0)
         elif arr[start] != arr[start]:
-            return Moments(1, arr[start + 1], 0, 0, False)
+            return Moments(1, arr[start + 1], 0, 0, False, arr[start + 1], 1)
         elif arr[start + 1] != arr[start + 1]:
-            return Moments(1, arr[start], 0, 0, False)
+            return Moments(1, arr[start], 0, 0, False, arr[start], 1)
 
-        result = Moments(2, 0, 0, 0, False)
+        result = Moments(2, 0, 0, 0, False, arr[start+1], 1)
         result.mean = (arr[start] + arr[start + 1]) / 2.0
         delta = arr[start] - arr[start + 1]
         result.m2 = delta * delta / 2.0
+        if arr[start] == arr[start + 1]:
+            result.nconsecutive = 2
         return result
 
     mid = start + (end - start) // 2
@@ -572,14 +591,19 @@ cdef Moments compute_moments(
 cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nogil:
     cdef:
         Moments result
-        float64_t left_n, right_n, n, delta, delta_n, delta2_n
-        bint is_zero, lost_significant_digits
+        float64_t left_n, right_n, n, delta, delta_n, delta2_n, m2_diff, m0_diff
+        bint ill_contitioned
+
+    # formulas adapted from
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Higher-order_statistics
 
     result.n = left_moment.n + right_moment.n
     result.numerically_unstable = (
         left_moment.numerically_unstable
         or right_moment.numerically_unstable
     )
+    result.last_value = right_moment.last_value
+    result.nconsecutive = right_moment.nconsecutive
 
     n = <float64_t>result.n
     right_n = right_moment.n
@@ -589,29 +613,39 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
     delta_n = delta / n
     delta2_n = delta * delta_n
 
-    result.m3 = (
-        left_moment.m3 + right_moment.m3 +
-        delta_n * (
-            3 * fma(left_n, right_moment.m2, -right_n * left_moment.m2) +
-            delta2_n * left_n * right_n * (left_n - right_n)
-        )
-    )
+    m2_diff = fma(left_n, right_moment.m2, -right_n * left_moment.m2)
+    m0_diff = delta2_n * left_n * right_n * (left_n - right_n)
+
+    result.m3 = left_moment.m3 + right_moment.m3 + delta_n * fma(3, m2_diff, m0_diff)
     result.m2 = left_moment.m2 + right_moment.m2 + delta2_n * left_n * right_n
     result.mean = left_moment.mean + delta_n * right_n
 
-    is_zero = fabs(result.m3) <= EpsF64 * EpsF64 * EpsF64 * result.m2 * fabs(result.mean)
-    lost_significant_digits = fabs(result.m3) < 1e3 * EpsF64 * fabs(left_moment.m3)
-    if not is_zero and lost_significant_digits:
+    ill_contitioned = fabs(result.m3) < InvConditionNumber * fabs(left_moment.m3)
+    if ill_contitioned:
         result.numerically_unstable = True
 
+    if (
+        left_moment.last_value == right_moment.last_value
+        and right_moment.n == right_moment.nconsecutive
+    ):
+        result.nconsecutive += left_moment.nconsecutive
 
     return result
 
 cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept nogil:
     cdef:
         Moments result
-        float64_t left_n, right_n, n, delta, delta_n, delta2_n
-        bint is_zero, lost_significant_digits
+        float64_t left_n, right_n, n, delta, delta_n, delta2_n, m2_diff, m0_diff
+        bint ill_contitioned
+
+    # update central moments after removing all observations from right_moment
+    # M_{p, n} = Sum_{k=0}^{p} Choose(p, k) * (delta / a) ^ k * (
+    #            b^k M_{p - k, a} - a^k M_{p - k, b}
+    # )
+    # a: left_moment.n
+    # b: right_moment.n
+    # M_{p, x}: p-th central moment for sample x.
+    # delta: mean_sample_b - mean_sample_a
 
     if left_moment.n < right_moment.n:
         left_moment, right_moment = right_moment, left_moment
@@ -621,6 +655,8 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
         left_moment.numerically_unstable
         or right_moment.numerically_unstable
     )
+    result.last_value = left_moment.last_value
+    result.nconsecutive = left_moment.nconsecutive
 
     n = <float64_t>result.n
     right_n = right_moment.n
@@ -630,101 +666,18 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
     delta_n = delta / n
     delta2_n = delta * delta_n
 
-    result.m3 = (
-        left_moment.m3 - right_moment.m3 +
-        delta_n * (
-            3 * (right_n * left_moment.m2 - left_n * right_moment.m2)
-            - delta2_n * left_n * right_n * (left_n + right_n)
-        )
-    )
+    m2_diff = fma(right_n , left_moment.m2, -left_n * right_moment.m2)
+    m0_diff = -delta2_n * left_n * right_n * (left_n + right_n)
+
+    result.m3 = left_moment.m3 - right_moment.m3 + delta_n *  fma(3.0, m2_diff, m0_diff)
     result.m2 = left_moment.m2 - right_moment.m2 - delta2_n * left_n * right_n
     result.mean = left_moment.mean - delta_n * right_n
 
-    is_zero = fabs(result.m3) <= EpsF64 * EpsF64 * EpsF64 * result.m2 * fabs(result.mean)
-    lost_significant_digits = fabs(result.m3) < 1e3 * EpsF64 * fabs(left_moment.m3)
-    if not is_zero and lost_significant_digits:
+    ill_contitioned = fabs(result.m3) < InvConditionNumber * fabs(left_moment.m3)
+    if ill_contitioned:
         result.numerically_unstable = True
 
     return result
-
-
-cdef void add_skew(float64_t val, int64_t *nobs,
-                   float64_t *mean, float64_t *m2,
-                   float64_t *m3,
-                   bint *numerically_unstable,
-                   int64_t *num_consecutive_same_value,
-                   float64_t *prev_value,
-                   ) noexcept nogil:
-    """ add a value from the skew calc """
-    cdef:
-        float64_t n, delta, delta_n, term1, m3_update, new_m3
-
-    # This formulas are adapted from
-    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Higher-order_statistics
-
-    # Not NaN
-    if val == val:
-        nobs[0] += 1
-        n = <float64_t>(nobs[0])
-        delta = val - mean[0]
-        delta_n = delta / n
-        term1 = delta * delta_n * (n - 1.0)
-
-        m3_update = delta_n * fma(term1, n - 2.0, -3.0 * m2[0])
-        new_m3 = m3[0] + m3_update
-        if fabs(m3_update) + fabs(m3[0]) > 1e10 * fabs(new_m3):
-            # possible catastrophic cancellation
-            numerically_unstable[0] = True
-
-        m3[0] = new_m3
-        m2[0] += term1
-        mean[0] += delta_n
-
-        # GH#42064, record num of same values to remove floating point artifacts
-        if val == prev_value[0]:
-            num_consecutive_same_value[0] += 1
-        else:
-            # reset to 1 (include current value itself)
-            num_consecutive_same_value[0] = 1
-        prev_value[0] = val
-
-
-cdef void remove_skew(float64_t val, int64_t *nobs,
-                      float64_t *mean, float64_t *m2,
-                      float64_t *m3,
-                      bint *numerically_unstable) noexcept nogil:
-    """ remove a value from the skew calc """
-    cdef:
-        float64_t n, delta, delta_n, term1, m3_update, new_m3
-
-    # This is the online update for the central moments
-    # when we remove an observation.
-    #
-    # δ = x - m_{n+1}
-    # m_{n} = m_{n+1} - (δ / n)
-    # m²_n = Σ_{i=1}^{n+1}(x_i - m_{n})² - (x - m_{n})² # uses new mean
-    #      = m²_{n+1} - (δ²/n)*(n+1)
-    # m³_n = Σ_{i=1}^{n+1}(x_i - m_{n})³ - (x - m_{n})³ # uses new mean
-    #      = m³_{n+1} - (δ³/n²)*(n+1)*(n+2) + 3 * m²_{n+1}*(δ/n)
-
-    # Not NaN
-    if val == val:
-        nobs[0] -= 1
-        n = <float64_t>(nobs[0])
-        delta = val - mean[0]
-        delta_n = delta / n
-        term1 = delta_n * delta * (n + 1.0)
-
-        m3_update = delta_n * fma(term1, n + 2.0, -3.0 * m2[0])
-        new_m3 = m3[0] - m3_update
-
-        if fabs(m3_update) + fabs(m3[0]) > 1e10 * fabs(new_m3):
-            # possible catastrophic cancellation
-            numerically_unstable[0] = True
-
-        m3[0] = new_m3
-        m2[0] -= term1
-        mean[0] -= delta_n
 
 
 def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
@@ -748,9 +701,12 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
     )
     output = np.empty(N, dtype=np.float64)
 
+    # Ensure values are contiguous to call PyArray_Data
+    values = np.ascontiguousarray(values)
+
     with nogil:
         values_ptr = <float64_t*>PyArray_DATA(values)
-        moments = Moments(0, 0, 0, 0, False)
+        moments = Moments(0, 0, 0, 0, False, 0, 0)
         for i in range(0, N):
 
             s = start[i]
@@ -780,10 +736,10 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
                 moments.numerically_unstable = False
                 num_consecutive_same_value = 0
 
-            output[i] = calc_skew(minp, moments.n, moments.mean, moments.m2, moments.m3, num_consecutive_same_value)
+            output[i] = calc_skew(minp, moments.n, moments.mean, moments.m2, moments.m3, moments.nconsecutive)
 
             if not is_monotonic_increasing_bounds:
-                moments = Moments(0, 0, 0, 0, False)
+                moments = Moments(0, 0, 0, 0, False, 0, 0)
 
     return output
 
