@@ -778,6 +778,7 @@ def roll_skew(ndarray[float64_t] values, ndarray[int64_t] start,
             if requires_recompute or moments.numerically_unstable:
                 moments = compute_moments(values_ptr, s, e)
                 moments.numerically_unstable = False
+                num_consecutive_same_value = 0
 
             output[i] = calc_skew(minp, moments.n, moments.mean, moments.m2, moments.m3, num_consecutive_same_value)
 
