@@ -615,10 +615,10 @@ cdef Moments add_moments(Moments left_moment, Moments right_moment) noexcept nog
     delta_n = delta / n
     delta2_n = delta * delta_n
 
-    m2_diff = fma(left_n, right_moment.m2, -right_n * left_moment.m2)
+    m2_diff = (left_n * right_moment.m2 - right_n * left_moment.m2)
     m0_diff = delta2_n * left_n * right_n * (left_n - right_n)
 
-    result.m3 = left_moment.m3 + right_moment.m3 + delta_n * fma(3, m2_diff, m0_diff)
+    result.m3 = left_moment.m3 + right_moment.m3 + delta_n * (3 * m2_diff + m0_diff)
     result.m2 = left_moment.m2 + right_moment.m2 + delta2_n * left_n * right_n
     result.mean = left_moment.mean + delta_n * right_n
 
@@ -672,10 +672,10 @@ cdef Moments remove_moments(Moments left_moment, Moments right_moment) noexcept 
     delta_n = delta / n
     delta2_n = delta * delta_n
 
-    m2_diff = fma(right_n , left_moment.m2, -left_n * right_moment.m2)
+    m2_diff = (right_n * left_moment.m2 - left_n * right_moment.m2)
     m0_diff = -delta2_n * left_n * right_n * (left_n + right_n)
 
-    result.m3 = left_moment.m3 - right_moment.m3 + delta_n * fma(3.0, m2_diff, m0_diff)
+    result.m3 = left_moment.m3 - right_moment.m3 + delta_n * (3.0 * m2_diff + m0_diff)
     result.m2 = left_moment.m2 - right_moment.m2 - delta2_n * left_n * right_n
     result.mean = left_moment.mean - delta_n * right_n
 
