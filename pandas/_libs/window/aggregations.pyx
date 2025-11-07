@@ -4,13 +4,16 @@ from libc.math cimport (
     fabs,
     round,
     signbit,
-    sqrt,
 )
 from libcpp.deque cimport deque
 from libcpp.stack cimport stack
 from libcpp.unordered_map cimport unordered_map
 
-from pandas._libs.algos cimport TiebreakEnumType
+from pandas._libs.algos cimport (
+    TiebreakEnumType,
+    calc_skew,
+    compute_moments,
+)
 
 import numpy as np
 
@@ -489,44 +492,6 @@ def roll_var(const float64_t[:] values, ndarray[int64_t] start,
 # Rolling skewness
 
 
-cdef float64_t calc_skew(int64_t minp, int64_t nobs,
-                         float64_t mean, float64_t m2, float64_t m3,
-                         int64_t num_consecutive_same_value
-                         ) noexcept nogil:
-    cdef:
-        float64_t result, dnobs
-        float64_t moments_ratio, correction
-
-    if nobs >= minp:
-        dnobs = <float64_t>nobs
-
-        if nobs < 3:
-            result = NaN
-        # GH 42064 46431
-        # uniform case, force result to be 0
-        elif num_consecutive_same_value >= nobs:
-            result = 0.0
-        # #18044: with degenerate distribution, floating issue will
-        #         cause m2 != 0. and cause the result is a very
-        #         large number.
-        #
-        #         in core/nanops.py nanskew/nankurt call the function
-        #         _zero_out_fperr(m2) to fix floating error.
-        #         if the variance is less than 1e-14, it could be
-        #         treat as zero, here we follow the original
-        #         skew/kurt behaviour to check m2 <= n * 1e-14
-        elif m2 <= dnobs * 1e-14:
-            result = NaN
-        else:
-            moments_ratio = m3 / (m2 * sqrt(m2))
-            correction = dnobs * sqrt((dnobs - 1)) / (dnobs - 2)
-            result = moments_ratio * correction
-    else:
-        result = NaN
-
-    return result
-
-
 cdef void add_skew(float64_t val, int64_t *nobs,
                    float64_t *mean, float64_t *m2,
                    float64_t *m3,
@@ -618,6 +583,7 @@ def roll_skew(const float64_t[:] values, ndarray[int64_t] start,
         ndarray[float64_t] output
         bint is_monotonic_increasing_bounds
         bint requires_recompute, numerically_unstable = False
+        bint skipna = True
 
     minp = max(minp, 3)
     is_monotonic_increasing_bounds = is_monotonic_increasing_start_end_bounds(
@@ -655,20 +621,14 @@ def roll_skew(const float64_t[:] values, ndarray[int64_t] start,
 
             if requires_recompute or numerically_unstable:
 
-                prev_value = values[s]
-                num_consecutive_same_value = 0
-
                 mean = m2 = m3 = 0.0
                 nobs = 0
 
-                for j in range(s, e):
-                    val = values[j]
-                    add_skew(val, &nobs, &mean, &m2, &m3, &numerically_unstable,
-                             &num_consecutive_same_value, &prev_value)
-
+                compute_moments[float64_t](values, s, e - s, skipna, None,
+                                           &nobs, &mean, &m2, &m3)
                 numerically_unstable = False
 
-            output[i] = calc_skew(minp, nobs, mean, m2, m3, num_consecutive_same_value)
+            output[i] = calc_skew(minp, nobs, mean, m2, m3)
 
             if not is_monotonic_increasing_bounds:
                 nobs = 0

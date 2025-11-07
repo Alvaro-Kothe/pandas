@@ -5,6 +5,7 @@ from cython cimport (
 )
 from libc.math cimport (
     NAN,
+    isnan,
     sqrt,
 )
 from libc.stdlib cimport (
@@ -32,6 +33,7 @@ cnp.import_array()
 
 from pandas._libs cimport util
 from pandas._libs.algos cimport (
+    calc_skew,
     get_rank_nan_fill_val,
     kth_smallest_c,
 )
@@ -992,7 +994,6 @@ def group_var(
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-@cython.cpow(True)
 def group_skew(
     float64_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1010,7 +1011,6 @@ def group_skew(
         float64_t[:, ::1] M1, M2, M3
         float64_t delta, delta_n, term1, val
         int64_t n1, n
-        float64_t ct
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
@@ -1063,18 +1063,9 @@ def group_skew(
 
         for i in range(ngroups):
             for j in range(K):
-                ct = <float64_t>nobs[i, j]
-                if ct < 3:
-                    if result_mask is not None:
-                        result_mask[i, j] = 1
-                    out[i, j] = NaN
-                elif M2[i, j] == 0:
-                    out[i, j] = 0
-                else:
-                    out[i, j] = (
-                        (ct * (ct - 1) ** 0.5 / (ct - 2))
-                        * (M3[i, j] / M2[i, j] ** 1.5)
-                    )
+                out[i, j] = calc_skew(3, nobs[i, j], M1[i, j], M2[i, j], M3[i, j])
+                if result_mask is not None and isnan(out[i, j]):
+                    result_mask[i, j] = 1
 
 
 @cython.wraparound(False)

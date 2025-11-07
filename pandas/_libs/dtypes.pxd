@@ -9,6 +9,7 @@ from numpy cimport (
     int16_t,
     int32_t,
     int64_t,
+    longdouble_t,
     uint8_t,
     uint16_t,
     uint32_t,
@@ -29,6 +30,12 @@ ctypedef fused numeric_t:
 
     float32_t
     float64_t
+
+# Floating point types
+ctypedef fused floating_t:
+    float32_t
+    float64_t
+    longdouble_t
 
 # All numeric types + object, doesn't include complex
 ctypedef fused numeric_object_t:

@@ -50,6 +50,21 @@ def nancorr_spearman(
 ) -> npt.NDArray[np.float64]: ...  # ndarray[float64_t, ndim=2]
 
 # ----------------------------------------------------------------------
+# Skewness
+
+def skew_2d(
+    values: np.ndarray,  # const floating_t[:, :]
+    axis: int,  # int
+    skipna: bool = True,  # bint skipna=True
+    mask: np.ndarray | None = None,  # const uint8_t[:, :] mask=None
+) -> np.ndarray: ...  # ndarray[floating_t, ndim=1]
+def skew_1d(
+    values: np.ndarray,  # const floating_t[:]
+    skipna: bool = True,  # bint skipna=True
+    mask: np.ndarray | None = None,  # const uint8_t[:, :] mask=None
+) -> float: ...  # floating_t
+
+# ----------------------------------------------------------------------
 
 def validate_limit(nobs: int | None, limit=...) -> int: ...
 def get_fill_indexer(

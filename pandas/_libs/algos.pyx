@@ -1,6 +1,7 @@
 cimport cython
 from cython cimport Py_ssize_t
 from libc.math cimport (
+    isnan,
     sqrt,
 )
 from libc.stdlib cimport (
@@ -27,6 +28,7 @@ from numpy cimport (
     int32_t,
     int64_t,
     intp_t,
+    longdouble_t,
     ndarray,
     uint8_t,
     uint16_t,
@@ -38,6 +40,7 @@ cnp.import_array()
 
 cimport pandas._libs.util as util
 from pandas._libs.dtypes cimport (
+    floating_t,
     numeric_object_t,
     numeric_t,
 )
@@ -60,6 +63,8 @@ cdef:
     float64_t FP_ERR = 1e-13
     float64_t NaN = <float64_t>np.nan
     int64_t NPY_NAT = get_nat()
+    float64_t EpsF64 = np.finfo(np.float64).eps
+    float64_t InvCondTol = EpsF64 * 1e3
 
 
 tiebreakers = {
@@ -1438,6 +1443,257 @@ def diff_2d(
                                     out[i, j] = left - right
                             else:
                                 out[i, j] = left - right
+
+
+# ----------------------------------------------------------------------
+# Skewness computation
+
+
+@cython.cdivision(True)
+cdef floating_t calc_skew(int64_t minp, int64_t nobs,
+                          floating_t mean, floating_t m2, floating_t m3
+                          ) noexcept nogil:
+    cdef:
+        floating_t result, dnobs
+        floating_t moments_ratio, correction
+
+    if nobs >= minp:
+        dnobs = <floating_t>nobs
+
+        if nobs < 3:
+            result = <floating_t>NaN
+        else:
+            moments_ratio = m3 / (m2 * sqrt(m2))
+            correction = dnobs * sqrt((dnobs - 1.0)) / (dnobs - 2.0)
+            result = moments_ratio * correction
+    else:
+        result = <floating_t>NaN
+
+    return result
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef void compute_moments(
+        const floating_t[:] values,
+        const Py_ssize_t start_index, const Py_ssize_t size,
+        const bint skipna,
+        const uint8_t[:] mask,
+        int64_t *nobs_out, floating_t *mean_out, floating_t *m2_out, floating_t *m3_out,
+        ) noexcept nogil:
+    cdef:
+        floating_t value
+        floating_t n, delta, delta_n, term1
+        floating_t tmp_mean, tmp_m2, tmp_m3
+        int64_t tmp_nobs
+        Py_ssize_t half_size, i
+
+    # Chan, T. F., Golub, G. H., & LeVeque, R. J. (1983).
+    # Algorithms for computing the sample variance:
+    # Analysis and recommendations.
+    # The American Statistician, 37(3), 242-247.
+    #
+    # Compute central moments using pairwise algorithm.
+    # According to the citation above,
+    # this method is the most well behaved
+    # against ill conditioned data and large samples,
+    # with error bound to condition-number * eps * log n
+
+    if size <= 32:
+        nobs_out[0] = 0
+        mean_out[0] = m2_out[0] = m3_out[0] = 0.0
+
+        for i in range(size):
+            value = (
+                values[start_index + i]
+                if mask is None or mask[start_index + i] == 0
+                else <floating_t>NaN
+            )
+            if skipna and isnan(value):
+                continue
+
+            # Formulas adapted from
+            # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Higher-order_statistics
+            nobs_out[0] += 1
+            n = nobs_out[0]
+            delta = value - mean_out[0]
+            delta_n = delta / n
+            term1 = delta * delta_n * (n - 1.0)
+
+            m3_out[0] += delta_n * (term1 * (n - 2.0) - 3.0 * m2_out[0])
+            m2_out[0] += term1
+            mean_out[0] += delta_n
+        return
+
+    half_size = size // 2
+
+    # Recurse left
+    compute_moments(values,
+                    start_index, half_size,
+                    skipna, mask,
+                    nobs_out, mean_out, m2_out, m3_out)
+    # Recurse right
+    compute_moments(values,
+                    start_index + half_size, size - half_size,
+                    skipna, mask,
+                    &tmp_nobs, &tmp_mean, &tmp_m2, &tmp_m3)
+
+    # Merge left and right
+    add_moments(nobs_out, mean_out, m2_out, m3_out,
+                tmp_nobs, tmp_mean, tmp_m2, tmp_m3)
+
+
+cdef void add_moments(int64_t *left_nobs, floating_t *left_mean,
+                      floating_t *left_m2, floating_t *left_m3,
+                      int64_t right_nobs, floating_t right_mean,
+                      floating_t right_m2, floating_t right_m3,
+                      ) noexcept nogil:
+    cdef:
+        floating_t left_n, right_n, n, delta, delta_n, delta2_n, m2_diff, m0_diff
+
+    # Formulas adapted from
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Higher-order_statistics
+
+    if left_nobs[0] == 0:
+        left_nobs[0] = right_nobs
+        left_mean[0] = right_mean
+        left_m2[0] = right_m2
+        left_m3[0] = right_m3
+        return
+    if right_nobs == 0:
+        return
+
+    left_n = left_nobs[0]
+    left_nobs[0] += right_nobs
+
+    n = left_nobs[0]
+    right_n = right_nobs
+
+    delta = right_mean - left_mean[0]
+    delta_n = delta / n
+    delta2_n = delta * delta_n
+
+    m2_diff = (left_n * right_m2 - right_n * left_m2[0])
+    m0_diff = delta2_n * left_n * right_n * (left_n - right_n)
+
+    left_m3[0] += right_m3 + delta_n * (3.0 * m2_diff + m0_diff)
+    left_m2[0] += right_m2 + delta2_n * left_n * right_n
+    left_mean[0] += delta_n * right_n
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def skew_2d(const floating_t[:, :] values, int axis,
+            bint skipna=True, const uint8_t[:, :] mask=None) -> ndarray[floating_t]:
+    """
+    Compute the unbiased sample skewness along the specified axis of a 2D array.
+
+    Parameters
+    ----------
+    values : 2D memoryview of floating_t
+        Input array for which to compute skewness.
+        Must be a 2D array of floating-point values.
+    axis : int
+        Axis along which to compute skewness.
+        Must be 0 (column-wise) or 1 (row-wise).
+    skipna : bint, default True
+        If True, skip NaN values during computation.
+        If False and NaN values are present, the result may be NaN.
+    mask : 2D memoryview of uint8_t, optional
+        Boolean mask indicating missing values.
+        If provided, must have the same shape as `values`.
+        values flagged by `mask` are considered `NaN`.
+
+    Returns
+    -------
+    ndarray[floating_t]
+        1D array containing the unbiased skewness values along the specified axis.
+    """
+    cdef:
+        Py_ssize_t i, n_outer, n_inner
+        ndarray[floating_t, ndim=1] result
+        int64_t nobs
+        floating_t mean, m2, m3
+        floating_t[:] index_view
+        uint8_t[:] mask_view = None
+
+    if axis == 0:
+        n_outer = values.shape[1]
+        n_inner = values.shape[0]
+    elif axis == 1:
+        n_outer = values.shape[0]
+        n_inner = values.shape[1]
+    else:
+        raise ValueError("Axis must be 0 or 1")
+
+    if floating_t is float32_t:
+        result = np.empty(n_outer, dtype=np.float32)
+    elif floating_t is float64_t:
+        result = np.empty(n_outer, dtype=np.float64)
+    else:
+        result = np.empty(n_outer, dtype=np.longdouble)
+
+    with nogil:
+        for i in range(n_outer):
+            index_view = values[:, i] if axis == 0 else values[i, :]
+            if mask is not None:
+                mask_view = mask[:, i] if axis == 0 else mask[i, :]
+
+            compute_moments[floating_t](index_view, 0, n_inner, skipna, mask_view,
+                                        &nobs, &mean, &m2, &m3)
+
+            result[i] = calc_skew(3, nobs, mean, m2, m3)
+    return result
+
+
+def skew_1d(const floating_t[:] values,
+            bint skipna=True, const uint8_t[:] mask=None) -> floating_t:
+    """
+    Compute the unbiased sample skewness for an 1D array.
+
+    Parameters
+    ----------
+    values : 1D memoryview of floating_t
+        Input array for which to compute skewness.
+        Must be a 2D array of floating-point values.
+    skipna : bint, default True
+        If True, skip NaN values during computation.
+        If False and NaN values are present, the result may be NaN.
+    mask : 1D memoryview of uint8_t, optional
+        Boolean mask indicating missing values.
+        If provided, must have the same length as `values`.
+        values flagged by `mask` are considered `NaN`.
+
+    Returns
+    -------
+    floating_t
+        Unbiased skewness value.
+        The return value will be a NumPy scalar
+        with type equivalent to `floating_t`.
+        Arrays of type long double (np.longdouble, np.float128, np.float96)
+        loses precision during the conversion.
+    """
+    cdef:
+        int64_t minp = 3, nobs
+        floating_t mean, m2, m3
+        floating_t output
+
+    with nogil:
+        compute_moments[floating_t](values, 0, len(values), skipna, mask,
+                                    &nobs, &mean, &m2, &m3)
+        output = calc_skew(minp, nobs, mean, m2, m3)
+
+    # FIXME: In the transpiled code,
+    # output is converted to PyFloat then converted to NumPy scalar.
+    if floating_t is float32_t:
+        return np.float32(output)
+    elif floating_t is float64_t:
+        return np.float64(output)
+    elif floating_t is longdouble_t:
+        return np.longdouble(output)
+    else:
+        # Returns PyFloat
+        return output
 
 
 # generated from template
