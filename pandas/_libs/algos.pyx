@@ -1457,17 +1457,14 @@ cdef floating_t calc_skew(int64_t minp, int64_t nobs,
         floating_t result, dnobs
         floating_t moments_ratio, correction
 
-    if nobs >= minp:
-        dnobs = <floating_t>nobs
+    if nobs < 3 or nobs < minp:
+        return <floating_t>NaN
 
-        if nobs < 3:
-            result = <floating_t>NaN
-        else:
-            moments_ratio = m3 / (m2 * sqrt(m2))
-            correction = dnobs * sqrt((dnobs - 1.0)) / (dnobs - 2.0)
-            result = moments_ratio * correction
-    else:
-        result = <floating_t>NaN
+    dnobs = <floating_t>nobs
+
+    moments_ratio = m3 / (m2 * sqrt(m2))
+    correction = dnobs * sqrt((dnobs - 1.0)) / (dnobs - 2.0)
+    result = moments_ratio * correction
 
     return result
 

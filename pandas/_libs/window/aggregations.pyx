@@ -12,7 +12,6 @@ from libcpp.unordered_map cimport unordered_map
 from pandas._libs.algos cimport (
     TiebreakEnumType,
     calc_skew,
-    compute_moments,
 )
 
 import numpy as np
@@ -583,7 +582,6 @@ def roll_skew(const float64_t[:] values, ndarray[int64_t] start,
         ndarray[float64_t] output
         bint is_monotonic_increasing_bounds
         bint requires_recompute, numerically_unstable = False
-        bint skipna = True
 
     minp = max(minp, 3)
     is_monotonic_increasing_bounds = is_monotonic_increasing_start_end_bounds(
