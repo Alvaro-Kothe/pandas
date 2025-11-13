@@ -624,8 +624,11 @@ def roll_skew(const float64_t[:] values, ndarray[int64_t] start,
                 mean = m2 = m3 = 0.0
                 nobs = 0
 
-                compute_moments[float64_t](values, s, e - s, skipna, None,
-                                           &nobs, &mean, &m2, &m3)
+                for j in range(s, e):
+                    val = values[j]
+                    add_skew(val, &nobs, &mean, &m2, &m3, &numerically_unstable,
+                             &num_consecutive_same_value, &prev_value)
+
                 numerically_unstable = False
 
             output[i] = calc_skew(minp, nobs, mean, m2, m3)
