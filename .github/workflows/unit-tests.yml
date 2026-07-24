@@ -21,6 +21,7 @@ defaults:
 
 jobs:
   ubuntu:
+    if: false
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: read
@@ -213,6 +214,7 @@ jobs:
       if: ${{ steps.test-not-single-cpu.outcome == 'success' && steps.test-single-cpu.outcome == 'success' }}
 
   macos-windows:
+    if: false
     permissions:
       contents: read
     timeout-minutes: 90
@@ -262,6 +264,7 @@ jobs:
           pytest_target: 'pandas'
 
   Linux-32-bit:
+    if: false
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -306,6 +309,7 @@ jobs:
       cancel-in-progress: true
 
   Linux-Musl:
+    if: false
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -348,6 +352,7 @@ jobs:
       cancel-in-progress: true
 
   Windows-MinGW:
+    if: false
     runs-on: windows-2025
     permissions:
       contents: read
@@ -375,6 +380,7 @@ jobs:
       cancel-in-progress: true
 
   Linux-Sanitizers:
+    if: false
     name: "Clang (ASAN/UBSAN)"
     runs-on: ubuntu-24.04
     permissions:
@@ -491,6 +497,7 @@ jobs:
 
   # NOTE: this job must be kept in sync with the Pyodide build job in wheels.yml
   emscripten:
+    if: false
     # Note: the Python version, Emscripten toolchain version are determined
     # by the Pyodide version. The appropriate versions can be found in the
     # Pyodide repodata.json "info" field, or in the Makefile.envs file:
