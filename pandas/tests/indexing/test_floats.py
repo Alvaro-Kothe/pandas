@@ -251,7 +251,9 @@ class TestFloatIndexers:
         # setitem
         if indexer_sli is tm.iloc:
             # otherwise we keep the same message as above
-            msg = "slice indices must be integers or None or have an __index__ method"
+            msg = (
+                r"slice indices must be integers (or None )?or have an __index__ method"
+            )
         with pytest.raises(TypeError, match=msg):
             indexer_sli(s)[idx] = 0
 

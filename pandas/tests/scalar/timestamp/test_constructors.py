@@ -262,7 +262,10 @@ class TestTimestampConstructorPositionalAndKeywordSupport:
     def test_constructor_keyword(self):
         # GH#10758
         msg = "|".join(
-            ["function missing required argument 'day'", "Required argument 'day'"]
+            [
+                r"(datetime\(\)|function)? missing required argument 'day'",
+                "Required argument 'day'",
+            ]
         )
         with pytest.raises(TypeError, match=msg):
             Timestamp(year=2000, month=1)
@@ -321,8 +324,10 @@ class TestTimestampConstructorPositionalAndKeywordSupport:
     def test_constructor_missing_keyword(self, kwargs):
         # GH#31200
 
-        # The exact error message of datetime() depends on its version
-        msg1 = r"function missing required argument '(year|month|day)' \(pos [123]\)"
+        msg1 = (
+            r"(datetime\(\) |function )?missing required argument '(year|month|day)' "
+            r"\(pos [123]\)"
+        )
         msg2 = r"Required argument '(year|month|day)' \(pos [123]\) not found"
         msg = "|".join([msg1, msg2])
 

@@ -464,7 +464,9 @@ class TestBase:
             # 0 vs 0.5 in error message varies with numpy version
             msg = "index (0|0.5) is out of bounds for axis 0 with size 0"
         else:
-            msg = "slice indices must be integers or None or have an __index__ method"
+            msg = (
+                r"slice indices must be integers (or None )?or have an __index__ method"
+            )
 
         if using_infer_string:
             if str(index.dtype) in {"str", "string", "category"}:

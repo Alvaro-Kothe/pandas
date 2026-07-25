@@ -1407,7 +1407,7 @@ class TestToDatetime:
     def test_invalid_format_raises(self, errors):
         # https://github.com/pandas-dev/pandas/issues/50255
         with pytest.raises(
-            ValueError, match="':' is a bad directive in format 'H%:M%:S%"
+            ValueError, match=r"':M?' is a bad directive in format 'H%:M%:S%"
         ):
             to_datetime(["00:00:00"], format="H%:M%:S%", errors=errors)
 

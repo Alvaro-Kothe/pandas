@@ -29,7 +29,7 @@ from pandas import (
 import pandas._testing as tm
 
 # We pass through a TypeError raised by numpy
-_slice_msg = "slice indices must be integers or None or have an __index__ method"
+_slice_msg = r"slice indices must be integers (or None )?or have an __index__ method"
 
 
 class TestDataFrameIndexing:
