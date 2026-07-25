@@ -718,6 +718,11 @@ cdef tzinfo _parse_with_format(
         #      handled by making out of other directives
         #   U, W
         #      worthless without day of the week
+        if group_val is None:
+            raise ValueError(
+                f"time data \"{val}\" doesn't match format \"{fmt}\""
+            )
+
         parse_code = _parse_code_table[group_key]
 
         if parse_code == 0:
